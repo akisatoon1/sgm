@@ -8,6 +8,6 @@ build:
 	mkdir -p build
 
 run: build/main
-	./build/main cones/im2.png cones/im2.png
+	./build/main cones/im2.png cones/im6.png
 
 .PHONY: run
