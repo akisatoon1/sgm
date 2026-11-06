@@ -8,17 +8,21 @@
 
 #include <opencv2/opencv.hpp>
 
+const int kCostInf = 500; // コストの最大値
+
+const int kMinDisparity = 1;  // 最小視差
+const int kMaxDisparity = 63; // 最大視差
+
+const int kWindowHeight = 7; // ウィンドウの高さ
+const int kWindowWidth = 9;  // ウィンドウの幅
+
 // Census変換に使うウィンドウが画像内に収まっているかを判定する。
 bool is_window_inside_image(const cv::Mat &image, const cv::Point &pixel_pos)
 {
-    // TODO: 重複有り
-    const int window_height = 7;
-    const int window_width = 9;
-
-    const int window_top_left_column = pixel_pos.x - window_width / 2;
-    const int window_top_left_row = pixel_pos.y - window_height / 2;
-    const int window_bottom_right_column = pixel_pos.x + window_width / 2;
-    const int window_bottom_right_row = pixel_pos.y + window_height / 2;
+    const int window_top_left_column = pixel_pos.x - kWindowWidth / 2;
+    const int window_top_left_row = pixel_pos.y - kWindowHeight / 2;
+    const int window_bottom_right_column = pixel_pos.x + kWindowWidth / 2;
+    const int window_bottom_right_row = pixel_pos.y + kWindowHeight / 2;
 
     const bool is_inside = (window_top_left_column >= 0) && (window_top_left_row >= 0) &&
                            (window_bottom_right_column < image.cols) && (window_bottom_right_row < image.rows);
@@ -27,14 +31,9 @@ bool is_window_inside_image(const cv::Mat &image, const cv::Point &pixel_pos)
 
 cv::Mat extract_window(const cv::Mat &image, const cv::Point &pixel_pos)
 {
-    // 左右画像で共通のウィンドウサイズを定義する。
-    // TODO: 重複有り
-    const int window_height = 7;
-    const int window_width = 9;
-
-    const int window_top_left_column = pixel_pos.x - window_width / 2;
-    const int window_top_left_row = pixel_pos.y - window_height / 2;
-    const cv::Rect window_rect{window_top_left_column, window_top_left_row, window_width, window_height};
+    const int window_top_left_column = pixel_pos.x - kWindowWidth / 2;
+    const int window_top_left_row = pixel_pos.y - kWindowHeight / 2;
+    const cv::Rect window_rect{window_top_left_column, window_top_left_row, kWindowWidth, kWindowHeight};
     return image(window_rect);
 }
 
@@ -76,14 +75,60 @@ int calc_pixel_cost(const cv::Mat &left_window, const cv::Mat &right_window)
     return hamming_distance;
 }
 
+// TODO: ネストが深くて分かりづらいし、行数も長い。
+cv::Mat_<int> calc_cost_map(const cv::Mat &left_gray_image, const cv::Mat &right_gray_image)
+{
+    const int disparity_range = kMaxDisparity - kMinDisparity + 1;
+    const int sizes[] = {left_gray_image.rows, left_gray_image.cols, disparity_range};
+    cv::Mat_<int> cost_map(3, sizes);
+
+    for (int row = 0; row < left_gray_image.rows; ++row)
+    {
+        for (int column = 0; column < left_gray_image.cols; ++column)
+        {
+
+            if (not is_window_inside_image(left_gray_image, cv::Point{column, row}))
+            {
+                // 左画像でウィンドウが画像をはみ出しているとき、その画素はコスト不明として扱う。
+                // TODO: コストの値は最大でよいのか?
+                for (int disparity = kMinDisparity; disparity <= kMaxDisparity; ++disparity)
+                {
+                    const int disparity_index = disparity - kMinDisparity;
+                    cost_map.at<int>(row, column, disparity_index) = kCostInf;
+                }
+                continue;
+            }
+            const cv::Mat left_image_window = extract_window(left_gray_image, cv::Point{column, row});
+
+            for (int disparity = kMinDisparity; disparity <= kMaxDisparity; ++disparity)
+            {
+                const int disparity_index = disparity - kMinDisparity;
+
+                const int right_column = column - disparity;
+                if (not is_window_inside_image(right_gray_image, cv::Point{right_column, row}))
+                {
+                    // 右画像のウィンドウを計算して、右画像のウィンドウが画像をはみ出しているときは、
+                    // 無視するためにコスト最大値として扱うようにする。
+                    // TODO: 本当に最大でよいのか?
+                    cost_map.at<int>(row, column, disparity_index) = kCostInf;
+                    continue;
+                }
+
+                const cv::Mat right_image_window = extract_window(right_gray_image, cv::Point{right_column, row});
+                const int pixel_cost = calc_pixel_cost(left_image_window, right_image_window);
+                cost_map.at<int>(row, column, disparity_index) = pixel_cost;
+            }
+        }
+    }
+    return cost_map;
+}
+
 // 視差マップを計算する。
 // 左右画像のサイズが同じであることを前提にしている。
 // 0の要素を持つ画素は視差が不明であることを意味する。
 // TODO: 関数の中身が長いのとネストが深くて、コードが見づらい。
 cv::Mat_<int> calc_disparity_map(const cv::Mat &left_gray_image, const cv::Mat &right_gray_image)
 {
-    const int kMinDisparity = 1;  // 最小視差
-    const int kMaxDisparity = 63; // 最大視差
     cv::Mat_<int> disparity_map(left_gray_image.rows, left_gray_image.cols);
 
     for (int row = 0; row < left_gray_image.rows; ++row)
