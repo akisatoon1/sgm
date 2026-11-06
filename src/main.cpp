@@ -1,5 +1,8 @@
 #include <algorithm>
+#include <bitset>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -17,8 +20,6 @@ const int kMaxDisparity = 63; // 最大視差
 
 const int kWindowHeight = 7; // ウィンドウの高さ
 const int kWindowWidth = 9;  // ウィンドウの幅
-
-const int kCensusBitCount = kWindowHeight * kWindowWidth - 1; // Census変換のビット数(中心を除く)
 
 // Census変換に使うウィンドウが画像内に収まっているかを判定する。
 bool is_window_inside_image(const cv::Mat &image, const cv::Point &pixel_pos)
@@ -41,13 +42,13 @@ cv::Mat extract_window(const cv::Mat &image, const cv::Point &pixel_pos)
     return image(window_rect);
 }
 
-// ウィンドウのCensus変換の結果を、census_mapの(pixel_row, pixel_column)に書き込む。
-void write_census_bits(const cv::Mat &window, cv::Mat_<uchar> &census_map, int pixel_row, int pixel_column)
+std::uint64_t convert_census_bits(const cv::Mat &window)
 {
     const int center_row = window.rows / 2;
     const int center_col = window.cols / 2;
     const int center_pixel_value = window.at<uchar>(center_row, center_col);
 
+    std::uint64_t bits = 0;
     int bit_index = 0;
     for (int row = 0; row < window.rows; ++row)
     {
@@ -60,19 +61,28 @@ void write_census_bits(const cv::Mat &window, cv::Mat_<uchar> &census_map, int p
             }
 
             const int pixel_value = window.at<uchar>(row, col);
-            census_map.at<uchar>(pixel_row, pixel_column, bit_index) = pixel_value < center_pixel_value ? 1 : 0;
+            if (pixel_value < center_pixel_value)
+            {
+                bits |= std::uint64_t{1} << bit_index;
+            }
             ++bit_index;
         }
     }
+    return bits;
+}
+
+// census_mapの添字を計算する。
+std::size_t calc_census_map_index(const cv::Mat &gray_image, const cv::Point &pixel_pos)
+{
+    return static_cast<std::size_t>(pixel_pos.y) * gray_image.cols + pixel_pos.x;
 }
 
 // 画像全体のCensus変換の結果を計算する。
-// 形状は(rows, cols, kCensusBitCount)で、各要素は0か1。
+// cv::Matはstd::uint64_tを要素にできないので、std::vectorに保存する。
 // ウィンドウが画像をはみ出している画素の値は使わないこと。is_window_inside_imageで判定できる。
-cv::Mat_<uchar> calc_census_map(const cv::Mat &gray_image)
+std::vector<std::uint64_t> calc_census_map(const cv::Mat &gray_image)
 {
-    const int sizes[] = {gray_image.rows, gray_image.cols, kCensusBitCount};
-    cv::Mat_<uchar> census_map(3, sizes, static_cast<uchar>(0));
+    std::vector<std::uint64_t> census_map(static_cast<std::size_t>(gray_image.rows) * gray_image.cols, 0);
 
     for (int row = 0; row < gray_image.rows; ++row)
     {
@@ -85,7 +95,7 @@ cv::Mat_<uchar> calc_census_map(const cv::Mat &gray_image)
             }
 
             const cv::Mat window = extract_window(gray_image, pixel_pos);
-            write_census_bits(window, census_map, row, column);
+            census_map[calc_census_map_index(gray_image, pixel_pos)] = convert_census_bits(window);
         }
     }
 
@@ -93,19 +103,10 @@ cv::Mat_<uchar> calc_census_map(const cv::Mat &gray_image)
 }
 
 // コストを計算するため。
-int calc_hamming_distance(const cv::Mat_<uchar> &left_census_map, const cv::Mat_<uchar> &right_census_map,
-                          const cv::Point &left_pixel_pos, const cv::Point &right_pixel_pos)
+int calc_hamming_distance(std::uint64_t left_census_bits, std::uint64_t right_census_bits)
 {
-    int hamming_distance = 0;
-    for (int bit_index = 0; bit_index < kCensusBitCount; ++bit_index)
-    {
-        const uchar left_bit = left_census_map.at<uchar>(left_pixel_pos.y, left_pixel_pos.x, bit_index);
-        const uchar right_bit = right_census_map.at<uchar>(right_pixel_pos.y, right_pixel_pos.x, bit_index);
-        if (left_bit != right_bit)
-        {
-            ++hamming_distance;
-        }
-    }
+    const std::bitset<64> xor_result{left_census_bits ^ right_census_bits};
+    const int hamming_distance = static_cast<int>(xor_result.count());
     return hamming_distance;
 }
 
@@ -116,8 +117,8 @@ cv::Mat_<int> calc_local_cost_map(const cv::Mat &left_gray_image, const cv::Mat 
     const int sizes[] = {left_gray_image.rows, left_gray_image.cols, disparity_range};
     cv::Mat_<int> local_cost_map(3, sizes);
 
-    const cv::Mat_<uchar> left_census_map = calc_census_map(left_gray_image);
-    const cv::Mat_<uchar> right_census_map = calc_census_map(right_gray_image);
+    const std::vector<std::uint64_t> left_census_map = calc_census_map(left_gray_image);
+    const std::vector<std::uint64_t> right_census_map = calc_census_map(right_gray_image);
 
     for (int row = 0; row < left_gray_image.rows; ++row)
     {
@@ -147,7 +148,9 @@ cv::Mat_<int> calc_local_cost_map(const cv::Mat &left_gray_image, const cv::Mat 
                     continue;
                 }
 
-                const int local_cost = calc_hamming_distance(left_census_map, right_census_map, left_pixel_pos, right_pixel_pos);
+                const std::uint64_t left_census_bits = left_census_map[calc_census_map_index(left_gray_image, left_pixel_pos)];
+                const std::uint64_t right_census_bits = right_census_map[calc_census_map_index(right_gray_image, right_pixel_pos)];
+                const int local_cost = calc_hamming_distance(left_census_bits, right_census_bits);
                 local_cost_map.at<int>(row, column, disparity_index) = local_cost;
             }
         }
