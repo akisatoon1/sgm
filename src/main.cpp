@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <bitset>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -121,6 +122,24 @@ cv::Mat_<int> calc_cost_map(const cv::Mat &left_gray_image, const cv::Mat &right
         }
     }
     return cost_map;
+}
+
+int calc_penalty(const int current_disparity, const int previous_disparity)
+{
+    // ペナルティの値はlibSGMの実装を参考にしている。
+    // AI調査により、ペナルティのデフォルト値が10, 120らしい。
+    if (current_disparity == previous_disparity)
+    {
+        return 0;
+    }
+    else if (std::abs(current_disparity - previous_disparity) == 1)
+    {
+        return 10;
+    }
+    else
+    {
+        return 120;
+    }
 }
 
 // 視差マップを計算する。
