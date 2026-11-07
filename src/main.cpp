@@ -176,19 +176,26 @@ int calc_penalty(const int current_disparity, const int previous_disparity)
     }
 }
 
-// TODO: 左から右のみをまずは実装する。
 // TODO: 読みづらい。
-cv::Mat_<int> calc_line_cost_map(const cv::Mat_<int> local_cost_map)
+// directionは八方向。
+cv::Mat_<int> calc_line_cost_map(const cv::Mat_<int> local_cost_map, const cv::Point &direction)
 {
     cv::Mat_<int> line_cost_map(3, local_cost_map.size);
 
-    for (int row = 0; row < local_cost_map.size[0]; ++row)
+    for (int row_index = 0; row_index < local_cost_map.size[0]; ++row_index)
     {
-        for (int column = 0; column < local_cost_map.size[1]; ++column)
+        const int row = (direction.y >= 0) ? row_index : (local_cost_map.size[0] - 1 - row_index);
+
+        for (int column_index = 0; column_index < local_cost_map.size[1]; ++column_index)
         {
-            if (column == 0)
+            const int column = (direction.x >= 0) ? column_index : (local_cost_map.size[1] - 1 - column_index);
+
+            const cv::Point previous_pixel_pos{column - direction.x, row - direction.y};
+            if (previous_pixel_pos.x < 0 || previous_pixel_pos.x >= local_cost_map.size[1] ||
+                previous_pixel_pos.y < 0 || previous_pixel_pos.y >= local_cost_map.size[0])
             {
-                // 最初の列は、コストマップの値をそのままコピーする。
+                // 前の画素が画像の範囲外にあるときは、現在の画素が最初の画素である。
+                // そのため、ローカルコストをそのままラインコストとして扱う。
                 for (int disparity_index = 0; disparity_index < local_cost_map.size[2]; ++disparity_index)
                 {
                     line_cost_map.at<int>(row, column, disparity_index) = local_cost_map.at<int>(row, column, disparity_index);
@@ -201,7 +208,7 @@ cv::Mat_<int> calc_line_cost_map(const cv::Mat_<int> local_cost_map)
                 int min_cost = std::numeric_limits<int>::max();
                 for (int previous_disparity_index = 0; previous_disparity_index < local_cost_map.size[2]; ++previous_disparity_index)
                 {
-                    const int previous_line_cost = line_cost_map.at<int>(row, column - 1, previous_disparity_index);
+                    const int previous_line_cost = line_cost_map.at<int>(previous_pixel_pos.y, previous_pixel_pos.x, previous_disparity_index);
                     const int penalty = calc_penalty(disparity_index, previous_disparity_index);
                     min_cost = std::min(min_cost, previous_line_cost + penalty);
                 }
@@ -223,8 +230,23 @@ cv::Mat_<int> calc_disparity_map(const cv::Mat &left_gray_image, const cv::Mat &
     cv::Mat_<int> disparity_map(left_gray_image.rows, left_gray_image.cols);
 
     const cv::Mat_<int> cost_map = calc_local_cost_map(left_gray_image, right_gray_image);
-    // TODO: ラインコストマップの計算は、左から右だけでなく、右から左、上から下、下から上の4方向を考慮する必要がある。
-    const cv::Mat_<int> line_cost_map = calc_line_cost_map(cost_map);
+
+    std::vector<cv::Point> directions = {
+        cv::Point{1, 0},   // 右
+        cv::Point{-1, 0},  // 左
+        cv::Point{0, 1},   // 下
+        cv::Point{0, -1},  // 上
+        cv::Point{1, 1},   // 右下
+        cv::Point{-1, -1}, // 左上
+        cv::Point{-1, 1},  // 左下
+        cv::Point{1, -1}   // 右上
+    };
+    cv::Mat_<int> sum_line_cost_map(3, cost_map.size, 0);
+    for (const cv::Point &direction : directions)
+    {
+        const cv::Mat_<int> line_cost_map = calc_line_cost_map(cost_map, direction);
+        sum_line_cost_map += line_cost_map;
+    }
 
     for (int row = 0; row < left_gray_image.rows; ++row)
     {
@@ -241,10 +263,10 @@ cv::Mat_<int> calc_disparity_map(const cv::Mat &left_gray_image, const cv::Mat &
 
             int min_cost_disparity_index = 0;
 
-            for (int disparity_index = 1; disparity_index < line_cost_map.size[2]; ++disparity_index)
+            for (int disparity_index = 1; disparity_index < sum_line_cost_map.size[2]; ++disparity_index)
             {
-                const int current_cost = line_cost_map.at<int>(row, column, disparity_index);
-                const int min_cost = line_cost_map.at<int>(row, column, min_cost_disparity_index);
+                const int current_cost = sum_line_cost_map.at<int>(row, column, disparity_index);
+                const int min_cost = sum_line_cost_map.at<int>(row, column, min_cost_disparity_index);
                 if (current_cost < min_cost)
                 {
                     min_cost_disparity_index = disparity_index;
